@@ -1,0 +1,16 @@
+node_modules/
+*.import
+.gdignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Godot
+export_presets.cfg
+*.pck
+*.exe

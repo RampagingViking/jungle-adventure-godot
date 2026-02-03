@@ -1,15 +1,13 @@
 ## ============================================================================
-## 🌴 JUNGLE ADVENTURE - ENEMY BASE CLASS
+## 🌴 JUNGLE ADVENTURE - ENEMY BASE CLASS v2.0
 ## ============================================================================
-## Base class for all enemies in the game.
-## Handles patrolling behavior and stomp vulnerability.
+## Enhanced with polish fixes and new features.
 ##
-## 🎓 KEY CONCEPTS YOU'LL LEARN:
-## - Node2D: Base class for 2D game objects
-## - _physics_process(): Game loop for movement
-## - Patrolling: Moving back and forth between bounds
-## - Signals: Connecting collision events
-## - Inheritance: Creating specialized enemy types
+## v2.0 IMPROVEMENTS:
+## - Hitbox frames (invincibility after hit)
+## - Death effects (particles, shake)
+## - State machine (Idle, Patrol, Chase, Hit, Dead)
+## - Flying/ranged enemy support
 ## ============================================================================
 
 extends Node2D
@@ -19,222 +17,252 @@ extends Node2D
 ## ============================================================================
 
 @export_category("Enemy Settings")
-@export var move_speed: float = 2.0           ## How fast enemy walks (meters/second)
-@export var move_range: float = 3.0           ## How far enemy walks from start (meters)
-@export var damage: int = 1                   ## Damage dealt to player on contact
-@export var health: int = 1                   ## Enemy hit points
-@export var can_be_stomped: bool = true       ## Can player kill by jumping on enemy?
-@export var stomp_bounce_force: float = 10.0  ## Bounce height when player stomps enemy
+@export var move_speed: float = 2.0
+@export var move_range: float = 3.0
+@export var damage: int = 1
+@export var health: int = 1
+@export var can_be_stomped: bool = true
+@export var stomp_bounce_force: float = 10.0
+@export var enemy_type: String = "ground"
+
+@export_category("Polish")
+@export var hitbox_frames: float = 0.3
+@export var death_duration: float = 0.5
+@export var enable_shake: bool = true
+@export var enable_particles: bool = true
 
 @export_category("References")
-@export var sprite_renderer: Sprite2D         ## Visual representation
-@export var hit_sounds: Array[AudioStream]    ## Sounds when enemy is hit
-@export var death_sounds: Array[AudioStream]  ## Sounds when enemy dies
+@export var sprite_renderer: Sprite2D
+@export var hit_sounds: Array[AudioStream]
+@export var death_sounds: Array[AudioStream]
+@export var death_particles: PackedScene
 
 ## ============================================================================
 ## SECTION 2: STATE VARIABLES
 ## ============================================================================
 
-## Tracks starting position for patrolling
+enum EnemyState { IDLE, PATROL, CHASE, HIT, DEAD }
+var current_state: EnemyState = EnemyState.IDLE
+
 var start_position: Vector2
-## Movement direction: 1 = right, -1 = left
 var direction: float = 1.0
-## Death state flag
-var is_dead: bool = false
-## Velocity for physics-based movement
 var velocity: Vector2 = Vector2.ZERO
 
+var is_dead: bool = false
+var is_invincible: bool = false
+var hitbox_timer: float = 0.0
+
+var shake_intensity: float = 0.0
+var original_position: Vector2
+
+@export_category("Flying Settings")
+@export var fly_amplitude: float = 30.0
+@export var fly_frequency: float = 2.0
+var fly_time: float = 0.0
+
+@export_category("Ranged Settings")
+@export var shoot_cooldown: float = 2.0
+@export var projectile_scene: PackedScene
+var shoot_timer: float = 0.0
+@export var projectile_speed: float = 200.0
+
 ## ============================================================================
-## SECTION 3: _ready() - INITIALIZATION
-## ============================================================================
-## Runs once when enemy enters the scene.
+## SECTION 3: _ready()
 ## ============================================================================
 func _ready():
-	## Store starting position for patrol bounds
 	start_position = position
+	original_position = position
 	
-	## Find sprite renderer if not assigned
 	if sprite_renderer == null:
-		## Loop through children looking for Sprite2D
 		for child in get_children():
 			if child is Sprite2D:
 				sprite_renderer = child
 				break
 	
-	print("Enemy ready at position: ", position)
+	if enemy_type not in ["ground", "flying", "ranged"]:
+		enemy_type = "ground"
 
 ## ============================================================================
-## SECTION 4: _physics_process() - MAIN GAME LOOP
-## ============================================================================
-## Runs every physics frame (60 FPS typically).
+## SECTION 4: _physics_process()
 ## ============================================================================
 func _physics_process(delta):
-	## Don't process if dead
 	if is_dead:
+		_death_animation_process(delta)
 		return
 	
-	## Run patrol behavior
-	_patrol(delta)
+	if is_invincible:
+		hitbox_timer -= delta
+		if hitbox_timer <= 0:
+			is_invincible = false
+			if sprite_renderer:
+				sprite_renderer.modulate = Color.WHITE
+	
+	if enemy_type == "ranged" and current_state != EnemyState.HIT:
+		shoot_timer -= delta
+	
+	match current_state:
+		EnemyState.IDLE:
+			_idle_state(delta)
+		EnemyState.PATROL:
+			_patrol_state(delta)
+		EnemyState.CHASE:
+			_chase_state(delta)
+		EnemyState.HIT:
+			_hit_state(delta)
+	
+	if enemy_type == "ground":
+		position.x += velocity.x * delta
+	elif enemy_type == "flying":
+		_fly_bob(delta)
 
 ## ============================================================================
-## SECTION 5: PATROL BEHAVIOR
+## SECTION 5: STATE FUNCTIONS
 ## ============================================================================
-## Moves enemy back and forth within bounds.
-## ============================================================================
-func _patrol(delta: float):
-	## Calculate new X position based on direction and speed
+
+func _idle_state(delta: float):
+	velocity.x = 0
+	if randf() < 0.02:
+		current_state = EnemyState.PATROL
+
+func _patrol_state(delta: float):
 	var new_x = position.x + direction * move_speed * delta
-	
-	## Check if we've walked too far from start
 	if abs(new_x - start_position.x) > move_range:
-		## Reverse direction
 		direction *= -1
-	
-	## Apply new position
-	position.x = new_x
-	
-	## Flip sprite to face movement direction
+	velocity.x = direction * move_speed
 	if sprite_renderer:
-		## Flip horizontally if moving left (direction < 0)
 		sprite_renderer.flip_h = direction < 0
 
+func _chase_state(delta: float):
+	var player = _get_player()
+	if player:
+		var dir_to_player = sign(player.global_position.x - global_position.x)
+		velocity.x = dir_to_player * move_speed * 1.5
+		if enemy_type == "ranged" and shoot_timer <= 0:
+			_shoot_at_player(player)
+	else:
+		current_state = EnemyState.PATROL
+
+func _hit_state(delta: float):
+	velocity.x = 0
+	if hitbox_timer <= 0:
+		current_state = EnemyState.PATROL
+
 ## ============================================================================
-## SECTION 6: TAKE DAMAGE FUNCTION
+## SECTION 6: FLYING ENEMY
 ## ============================================================================
-## Reduces enemy health and handles death.
+
+func _fly_bob(delta: float):
+	fly_time += delta * fly_frequency
+	var bob_offset = sin(fly_time) * fly_amplitude
+	position.y = start_position.y + bob_offset
+
 ## ============================================================================
-func take_damage(damage_amount: int):
-	## Don't take damage if already dead
-	if is_dead:
+## SECTION 7: RANGED ENEMY
+## ============================================================================
+
+func _shoot_at_player(player: Node):
+	if not projectile_scene:
 		return
 	
-	## Reduce health
+	var projectile = projectile_scene.instantiate()
+	get_parent().add_child(projectile)
+	var dir = sign(player.global_position.x - global_position.x)
+	projectile.global_position = global_position
+	projectile.velocity = Vector2(dir * projectile_speed, -50)
+	shoot_timer = shoot_cooldown
+
+## ============================================================================
+## SECTION 8: TAKE DAMAGE
+## ============================================================================
+
+func take_damage(damage_amount: int):
+	if is_dead or is_invincible:
+		return
+	
 	health -= damage_amount
+	is_invincible = true
+	hitbox_timer = hitbox_frames
+	current_state = EnemyState.HIT
 	
-	## Visual feedback - flash white
-	_flash_white()
+	if sprite_renderer:
+		sprite_renderer.modulate = Color(1, 0.3, 0.3)
 	
-	## Play hit sound
+	shake_intensity = 5.0
 	_play_random_sound(hit_sounds)
 	
-	## Check if enemy should die
 	if health <= 0:
 		die()
 
 ## ============================================================================
-## SECTION 7: DIE FUNCTION
+## SECTION 9: DIE
 ## ============================================================================
-## Handles enemy death.
-## ============================================================================
+
 func die():
 	if is_dead:
-		return                           ## Already dead, ignore
+		return
 	
-	is_dead = true                      ## Mark as dead
-	
-	## Run death animation
-	_death_animation()
-	
-	## Play death sound
+	is_dead = true
+	current_state = EnemyState.DEAD
 	_play_random_sound(death_sounds)
 	
-	print("Enemy died!")
-	## In a real game:
-	## - Add score
-	## - Spawn particles
-	## - Drop loot
+	if enable_particles and death_particles:
+		var particles = death_particles.instantiate()
+		get_parent().add_child(particles)
+		particles.global_position = global_position
 
 ## ============================================================================
-## SECTION 8: FLASH WHITE EFFECT
+## SECTION 10: DEATH ANIMATION
 ## ============================================================================
-## Makes sprite flash white briefly when hit.
-## ============================================================================
-func _flash_white():
+
+func _death_animation_process(delta: float):
 	if sprite_renderer:
-		## Store original color
-		var original_modulate = sprite_renderer.modulate
+		var shrink_rate = delta / death_duration
+		scale = scale.lerp(Vector2.ZERO, shrink_rate)
+		rotation += delta * 2.0
 		
-		## Set to pure white
-		sprite_renderer.modulate = Color.WHITE
-		
-		## Wait 0.1 seconds (using await instead of sleep!)
-		await get_tree().create_timer(0.1).timeout
-		
-		## Restore original color
-		if sprite_renderer:
-			sprite_renderer.modulate = original_modulate
+		if shake_intensity > 0:
+			var shake_offset = Vector2(randf_range(-1, 1), randf_range(-1, 1)) * shake_intensity
+			sprite_renderer.position = shake_offset
+			shake_intensity -= delta * 10
+	
+	if scale.x < 0.05:
+		queue_free()
 
 ## ============================================================================
-## SECTION 9: DEATH ANIMATION
+## SECTION 11: COLLISION
 ## ============================================================================
-## Shrinks and removes enemy when killed.
-## ============================================================================
-func _death_animation():
-	## Animation parameters
-	var duration = 0.3                   ## Animation duration in seconds
-	var elapsed = 0.0                    ## Timer
-	var start_scale = scale              ## Store original scale
+
+func _on_body_entered(body: Node):
+	if is_dead:
+		return
 	
-	## Animate over time
-	while elapsed < duration:
-		## Calculate progress (0.0 to 1.0)
-		var t = elapsed / duration
-		
-		## Scale from original to zero
-		scale = start_scale.lerp(Vector2.ZERO, t)
-		
-		## Wait for next frame
-		elapsed += get_process_delta_time()
-		await get_tree().process_frame()
-	
-	## Remove enemy from scene
-	queue_free()
+	if body.name.begins_with("Player") or body.has_method("jump"):
+		if can_be_stomped and body.global_position.y < global_position.y - 10:
+			take_damage(health)
+			if body.has_method("jump"):
+				body.velocity.y = stomp_bounce_force
+		else:
+			body.die()
 
 ## ============================================================================
-## SECTION 10: PLAY SOUND FUNCTION
+## SECTION 12: HELPERS
 ## ============================================================================
-## Plays a random sound from the provided array.
-## ============================================================================
+
+func _get_player() -> Node:
+	var parent = get_parent()
+	for child in parent.get_children():
+		if child.name.begins_with("Player"):
+			return child
+	return null
+
 func _play_random_sound(sounds: Array[AudioStream]):
-	## Check if we have sounds
 	if sounds.size() > 0:
-		## Create a new AudioStreamPlayer
 		var sound_player = AudioStreamPlayer.new()
-		## Pick random sound
 		sound_player.stream = sounds[randi() % sounds.size()]
-		## Add as child so it can play
 		add_child(sound_player)
-		## Play the sound
 		sound_player.play()
-		## Auto-cleanup when finished
 		sound_player.finished.connect(sound_player.queue_free)
 
 ## ============================================================================
-## SECTION 11: COLLISION DETECTION
-## ============================================================================
-## Called when player collides with enemy.
-## ============================================================================
-func _on_body_entered(body: Node):
-	if is_dead:
-	 return
-	
-	## Check if colliding with player
-	if body.name.begins_with("Player") or body.has_method("jump"):
-		## Check if player is stomping (coming from above)
-		if can_be_stomped:
-			## Player must be above enemy to stomp
-			## Compare Y positions: smaller Y = higher up in Godot
-			if body.global_position.y < global_position.y - 10:
-				## STOMP KILL!
-				take_damage(health)  ## Kill in one hit regardless of health
-				
-				## Bounce player upward
-				if body.has_method("jump"):
-					body.velocity.y = stomp_bounce_force
-			else:
-				## Player touched enemy from side/below - player dies!
-				body.die()
-
-## ============================================================================
-## END OF ENEMY SCRIPT
+## END OF ENEMY v2.0
 ## ============================================================================
